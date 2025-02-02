@@ -2,6 +2,8 @@ import os
 import uuid
 import shutil
 import logging
+import gc
+import psutil
 from pathlib import Path
 from flask import Flask, request, render_template, url_for, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
@@ -11,10 +13,16 @@ app = Flask(__name__)
 
 # Set up logging with more detailed format
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def log_memory_usage():
+    """Log current memory usage."""
+    process = psutil.Process(os.getpid())
+    mem_info = process.memory_info()
+    logger.info(f"Memory usage - RSS: {mem_info.rss / 1024 / 1024:.2f}MB, VMS: {mem_info.vms / 1024 / 1024:.2f}MB")
 
 # Configuration
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
@@ -34,6 +42,7 @@ if os.environ.get('RENDER'):
     logger.info(f"Current working directory: {os.getcwd()}")
     logger.info(f"Directory listing: {os.listdir('.')}")
     logger.info(f"Storage directory: {STORAGE_DIR}")
+    log_memory_usage()
 else:
     # Local development paths
     UPLOAD_FOLDER = BASE_DIR / 'uploads'
@@ -42,29 +51,34 @@ else:
 
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'm4a', 'flac'}
 
-# Ensure directories exist with proper permissions
-try:
-    # Create directories with explicit permissions
-    for directory in [STORAGE_DIR, UPLOAD_FOLDER, RESULTS_FOLDER, STATIC_FOLDER]:
+def create_directory(directory):
+    """Create directory and verify it's writable."""
+    try:
         directory.mkdir(exist_ok=True, parents=True, mode=0o755)
         logger.info(f"Created directory: {directory}")
         
         # Verify directory is writable
         test_file = directory / '.test_write'
-        try:
-            test_file.touch()
-            test_file.unlink()
-            logger.info(f"Successfully verified write permissions for: {directory}")
-        except Exception as e:
-            logger.error(f"Directory {directory} is not writable: {e}")
-            raise
+        test_file.touch()
+        test_file.unlink()
+        logger.info(f"Successfully verified write permissions for: {directory}")
+        return True
+    except Exception as e:
+        logger.error(f"Error with directory {directory}: {e}", exc_info=True)
+        return False
+
+# Ensure directories exist with proper permissions
+try:
+    directories_ok = all(create_directory(d) for d in [STORAGE_DIR, UPLOAD_FOLDER, RESULTS_FOLDER, STATIC_FOLDER])
+    if not directories_ok:
+        raise Exception("Failed to create or verify one or more directories")
 except Exception as e:
     logger.error(f"Error setting up directories: {e}", exc_info=True)
     raise
 
-# Initialize the audio analyzer with explicit CPU device
+# Initialize the audio analyzer with explicit CPU device and chunk processing
 try:
-    analyzer = AudioAnalyzer(model_name='htdemucs', target_sr=44100, device='cpu')
+    analyzer = AudioAnalyzer(model_name='htdemucs', target_sr=44100, device='cpu', chunk_size=5)
     logger.info("Successfully initialized AudioAnalyzer")
 except Exception as e:
     logger.error(f"Error initializing AudioAnalyzer: {e}", exc_info=True)
@@ -104,17 +118,14 @@ def cleanup_old_files():
 @app.route('/')
 def index():
     """Render the upload page."""
-    try:
-        cleanup_old_files()  # Clean up old files on page load
-        return render_template('index.html')
-    except Exception as e:
-        logger.error(f"Error in index route: {e}", exc_info=True)
-        return "Internal server error", 500
+    cleanup_old_files()  # Clean up old files on page load
+    return render_template('index.html')
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
     """Handle file upload and processing."""
     logger.info("Starting file upload process")
+    log_memory_usage()
     
     try:
         if 'audio' not in request.files:
@@ -136,30 +147,30 @@ def upload_file():
         logger.info(f"Saving uploaded file to: {upload_path}")
         
         # Ensure upload directory exists
-        UPLOAD_FOLDER.mkdir(exist_ok=True, parents=True)
+        if not create_directory(UPLOAD_FOLDER):
+            raise Exception("Failed to create upload directory")
         
         # Save the file
         file.save(upload_path)
         logger.info(f"File saved successfully: {upload_path}")
-        
-        # Verify file was saved
-        if not upload_path.exists():
-            raise Exception(f"File was not saved successfully: {upload_path}")
+        file_size = upload_path.stat().st_size
+        logger.info(f"File size: {file_size / (1024*1024):.2f}MB")
         
         # Create unique output directory
         output_dir = RESULTS_FOLDER / str(uuid.uuid4())
-        output_dir.mkdir(exist_ok=True, parents=True)
-        logger.info(f"Created output directory: {output_dir}")
+        if not create_directory(output_dir):
+            raise Exception("Failed to create output directory")
         
         # Process the audio file
         logger.info("Starting audio processing")
+        log_memory_usage()
+        
+        # Clear memory before processing
+        gc.collect()
+        
         separated_paths, sr = analyzer.separate_sources(str(upload_path), output_dir=str(output_dir))
         logger.info("Audio processing completed")
-        
-        # Verify output files exist
-        for stem_path in separated_paths.values():
-            if not Path(stem_path).exists():
-                raise Exception(f"Output file was not created: {stem_path}")
+        log_memory_usage()
         
         # Convert filesystem paths to URL paths
         result_paths = {}
@@ -175,6 +186,10 @@ def upload_file():
         upload_path.unlink()
         logger.info("Cleaned up uploaded file")
         
+        # Clear memory after processing
+        gc.collect()
+        log_memory_usage()
+        
         return jsonify({
             'success': True,
             'redirect': url_for('results', result_id=output_dir.name)
@@ -182,6 +197,7 @@ def upload_file():
     
     except Exception as e:
         logger.error(f"Error processing file: {str(e)}", exc_info=True)
+        log_memory_usage()
         # Clean up any uploaded/processed files
         if 'upload_path' in locals():
             try:
@@ -198,26 +214,23 @@ def upload_file():
 @app.route('/results/<result_id>')
 def results(result_id):
     """Display the results page."""
+    output_dir = RESULTS_FOLDER / result_id
+    if not output_dir.exists():
+        logger.error(f"Results not found for ID: {result_id}")
+        return "Results not found", 404
+    
     try:
-        output_dir = RESULTS_FOLDER / result_id
-        if not output_dir.exists():
-            logger.error(f"Results not found for ID: {result_id}")
-            return "Results not found", 404
-        
         # Get all WAV files in the output directory
         stems = {}
         for wav_file in output_dir.glob('*.wav'):
             stem_name = wav_file.stem
             if os.environ.get('RENDER'):
+                # For Render, serve through the static endpoint
                 rel_path = os.path.relpath(wav_file, STATIC_FOLDER)
                 stems[stem_name] = url_for('static', filename=rel_path)
             else:
                 rel_path = os.path.relpath(wav_file, BASE_DIR / 'static')
                 stems[stem_name] = url_for('static', filename=rel_path)
-        
-        if not stems:
-            logger.error(f"No stems found in output directory: {output_dir}")
-            return "No results found", 404
         
         logger.info(f"Found stems for result {result_id}: {list(stems.keys())}")
         return render_template('results.html', stems=stems)
@@ -230,7 +243,6 @@ def serve_static(filename):
     """Serve static files."""
     try:
         if os.environ.get('RENDER'):
-            logger.info(f"Serving static file from {STATIC_FOLDER}: {filename}")
             return send_from_directory(STATIC_FOLDER, filename)
         return app.send_static_file(filename)
     except Exception as e:
