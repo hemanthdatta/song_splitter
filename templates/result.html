@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Separated Audio Results</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 40px; }
+    .container { max-width: 800px; margin: auto; }
+    h1 { text-align: center; }
+    .stem { margin-bottom: 30px; }
+    audio { width: 100%; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Separated Audio Stems</h1>
+    {% for stem, url in stems.items() %}
+      <div class="stem">
+        <h3>{{ stem|capitalize }}</h3>
+        <audio controls>
+          <source src="{{ url }}" type="audio/wav">
+          Your browser does not support the audio element.
+        </audio>
+        <p><a href="{{ url }}" download>Download {{ stem }}</a></p>
+      </div>
+    {% endfor %}
+    <p><a href="{{ url_for('index') }}">Process another audio file</a></p>
+  </div>
+</body>
+</html> 

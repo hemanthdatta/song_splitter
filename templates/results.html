@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Song Splitter - Results</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .waveform-container {
+            position: relative;
+            height: 100px;
+            background: #F3F4F6;
+            border-radius: 0.5rem;
+            overflow: hidden;
+        }
+        .stem-card {
+            transition: transform 0.2s ease;
+        }
+        .stem-card:hover {
+            transform: translateY(-2px);
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <header class="text-center mb-12">
+            <h1 class="text-4xl font-bold text-indigo-600 mb-2">Separated Stems</h1>
+            <p class="text-gray-600">Your song has been successfully split into individual tracks</p>
+        </header>
+
+        <div class="max-w-4xl mx-auto space-y-6">
+            {% for stem_name, stem_path in stems.items() %}
+            <div class="stem-card bg-white rounded-lg shadow-lg p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center space-x-3">
+                        <div class="w-10 h-10 rounded-full bg-indigo-100 flex items-center justify-center">
+                            <i class="fas fa-{% if stem_name == 'vocals' %}microphone{% elif stem_name == 'drums' %}drum{% elif stem_name == 'bass' %}guitar{% else %}music{% endif %} text-indigo-600"></i>
+                        </div>
+                        <h2 class="text-xl font-semibold text-gray-800 capitalize">{{ stem_name }}</h2>
+                    </div>
+                    <a href="{{ stem_path }}" download class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-indigo-700 bg-indigo-100 hover:bg-indigo-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                        <i class="fas fa-download mr-2"></i>
+                        Download
+                    </a>
+                </div>
+
+                <div class="waveform-container mb-4" id="waveform-{{ stem_name }}">
+                    <!-- Waveform will be rendered here -->
+                </div>
+
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center space-x-4">
+                        <button onclick="togglePlay('{{ stem_name }}', '{{ stem_path }}')" class="play-button text-indigo-600 hover:text-indigo-700 focus:outline-none">
+                            <i class="fas fa-play"></i>
+                        </button>
+                        <span class="time-display text-sm text-gray-500">0:00 / 0:00</span>
+                    </div>
+                    <div class="flex items-center space-x-4">
+                        <input type="range" class="volume-slider w-24" min="0" max="100" value="100"
+                               oninput="updateVolume('{{ stem_name }}', this.value)">
+                        <i class="fas fa-volume-up text-gray-500"></i>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <div class="text-center mt-8">
+            <a href="/" class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                <i class="fas fa-arrow-left mr-2"></i>
+                Process Another Song
+            </a>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
+    <script>
+        const players = {};
+        const wavesurfers = {};
+
+        // Initialize WaveSurfer instances for each stem
+        {% for stem_name, stem_path in stems.items() %}
+        wavesurfers['{{ stem_name }}'] = WaveSurfer.create({
+            container: '#waveform-{{ stem_name }}',
+            waveColor: '#818CF8',
+            progressColor: '#4F46E5',
+            cursorColor: '#4F46E5',
+            barWidth: 2,
+            barGap: 1,
+            height: 100,
+            url: '{{ stem_path }}'
+        });
+        {% endfor %}
+
+        function togglePlay(stemName, stemPath) {
+            const wavesurfer = wavesurfers[stemName];
+            const button = document.querySelector(`#waveform-${stemName}`).parentElement.querySelector('.play-button i');
+            
+            if (wavesurfer.isPlaying()) {
+                wavesurfer.pause();
+                button.classList.remove('fa-pause');
+                button.classList.add('fa-play');
+            } else {
+                wavesurfer.play();
+                button.classList.remove('fa-play');
+                button.classList.add('fa-pause');
+            }
+        }
+
+        function updateVolume(stemName, value) {
+            const wavesurfer = wavesurfers[stemName];
+            wavesurfer.setVolume(value / 100);
+        }
+
+        // Update time displays
+        {% for stem_name in stems %}
+        wavesurfers['{{ stem_name }}'].on('audioprocess', function() {
+            const timeDisplay = document.querySelector(`#waveform-{{ stem_name }}`).parentElement.querySelector('.time-display');
+            timeDisplay.textContent = formatTime(wavesurfers['{{ stem_name }}'].getCurrentTime()) + ' / ' + 
+                                    formatTime(wavesurfers['{{ stem_name }}'].getDuration());
+        });
+
+        wavesurfers['{{ stem_name }}'].on('finish', function() {
+            const button = document.querySelector(`#waveform-{{ stem_name }}`).parentElement.querySelector('.play-button i');
+            button.classList.remove('fa-pause');
+            button.classList.add('fa-play');
+        });
+        {% endfor %}
+
+        function formatTime(seconds) {
+            seconds = Math.floor(seconds);
+            const minutes = Math.floor(seconds / 60);
+            seconds = seconds % 60;
+            return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+        }
+    </script>
+</body>
+</html> 
