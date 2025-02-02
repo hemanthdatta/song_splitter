@@ -6,7 +6,6 @@ import soundfile as sf
 from pathlib import Path
 from demucs.pretrained import get_model
 from demucs.apply import apply_model
-import matplotlib.pyplot as plt
 
 class AudioAnalyzer:
     def __init__(self, model_name='htdemucs', target_sr=44100):
