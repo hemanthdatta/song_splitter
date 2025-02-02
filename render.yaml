@@ -3,7 +3,7 @@ services:
     name: song-splitter
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
     plan: free
     envVars:
       - key: PYTHON_VERSION
@@ -12,4 +12,10 @@ services:
         value: app.py
       - key: FLASK_ENV
         value: production
-    autoDeploy: true 
+      - key: PORT
+        value: 10000
+    autoDeploy: true
+    disk:
+      name: storage
+      mountPath: /opt/render/project/src/storage
+      sizeGB: 1 

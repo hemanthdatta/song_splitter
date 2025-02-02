@@ -14,22 +14,25 @@ BASE_DIR = Path(os.getcwd())
 
 # Use environment variable for production paths
 if os.environ.get('RENDER'):
-    # On Render, use the specific persistent storage directory
-    STORAGE_DIR = Path('/data')
-    STORAGE_DIR.mkdir(exist_ok=True)
+    # On Render, use the specific storage path we have permission for
+    STORAGE_DIR = Path('/opt/render/project/src/storage')
     UPLOAD_FOLDER = STORAGE_DIR / 'uploads'
     RESULTS_FOLDER = STORAGE_DIR / 'results'
-    app.config['STATIC_FOLDER'] = str(STORAGE_DIR / 'static')
+    STATIC_FOLDER = STORAGE_DIR / 'static'
+    app.static_folder = str(STATIC_FOLDER)
 else:
     # Local development paths
     UPLOAD_FOLDER = BASE_DIR / 'uploads'
     RESULTS_FOLDER = BASE_DIR / 'static' / 'results'
+    STATIC_FOLDER = BASE_DIR / 'static'
 
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'm4a', 'flac'}
 
 # Ensure directories exist
+STORAGE_DIR.mkdir(exist_ok=True, parents=True)
 UPLOAD_FOLDER.mkdir(exist_ok=True, parents=True)
 RESULTS_FOLDER.mkdir(exist_ok=True, parents=True)
+STATIC_FOLDER.mkdir(exist_ok=True, parents=True)
 
 # Initialize the audio analyzer
 analyzer = AudioAnalyzer(model_name='htdemucs', target_sr=44100)
@@ -42,10 +45,11 @@ def cleanup_old_files():
     """Clean up files older than 24 hours."""
     import time
     current_time = time.time()
+    max_age = 86400  # 24 hours
     
     # Cleanup uploads
     for file_path in UPLOAD_FOLDER.glob('*'):
-        if current_time - file_path.stat().st_mtime > 86400:  # 24 hours
+        if current_time - file_path.stat().st_mtime > max_age:
             try:
                 file_path.unlink()
             except Exception as e:
@@ -53,7 +57,7 @@ def cleanup_old_files():
     
     # Cleanup results
     for dir_path in RESULTS_FOLDER.glob('*'):
-        if dir_path.is_dir() and current_time - dir_path.stat().st_mtime > 86400:
+        if dir_path.is_dir() and current_time - dir_path.stat().st_mtime > max_age:
             try:
                 shutil.rmtree(dir_path)
             except Exception as e:
@@ -95,9 +99,9 @@ def upload_file():
         result_paths = {}
         for stem, path in separated_paths.items():
             if os.environ.get('RENDER'):
-                # For Render, we need to handle static files differently
-                rel_path = os.path.relpath(path, STORAGE_DIR)
-                result_paths[stem] = f'/static/{rel_path}'
+                # For Render, serve through the static endpoint
+                rel_path = os.path.relpath(Path(path), STATIC_FOLDER)
+                result_paths[stem] = url_for('static', filename=rel_path)
             else:
                 rel_path = os.path.relpath(path, BASE_DIR / 'static')
                 result_paths[stem] = url_for('static', filename=rel_path)
@@ -117,7 +121,7 @@ def upload_file():
             upload_path.unlink(missing_ok=True)
         if 'output_dir' in locals():
             shutil.rmtree(output_dir, ignore_errors=True)
-        return jsonify({'error': 'Error processing file'}), 500
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/results/<result_id>')
 def results(result_id):
@@ -131,9 +135,9 @@ def results(result_id):
     for wav_file in output_dir.glob('*.wav'):
         stem_name = wav_file.stem
         if os.environ.get('RENDER'):
-            # For Render, we need to handle static files differently
-            rel_path = os.path.relpath(wav_file, STORAGE_DIR)
-            stems[stem_name] = f'/static/{rel_path}'
+            # For Render, serve through the static endpoint
+            rel_path = os.path.relpath(wav_file, STATIC_FOLDER)
+            stems[stem_name] = url_for('static', filename=rel_path)
         else:
             rel_path = os.path.relpath(wav_file, BASE_DIR / 'static')
             stems[stem_name] = url_for('static', filename=rel_path)
@@ -142,9 +146,9 @@ def results(result_id):
 
 @app.route('/static/<path:filename>')
 def serve_static(filename):
-    """Serve static files from the storage directory on Render."""
+    """Serve static files."""
     if os.environ.get('RENDER'):
-        return send_from_directory(STORAGE_DIR, filename)
+        return send_from_directory(STATIC_FOLDER, filename)
     return app.send_static_file(filename)
 
 @app.errorhandler(413)
