@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: song-splitter
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    plan: free
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.13
+      - key: FLASK_APP
+        value: app.py
+      - key: FLASK_ENV
+        value: production
+    autoDeploy: true 

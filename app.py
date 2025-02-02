@@ -11,13 +11,25 @@ app = Flask(__name__)
 # Configuration
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 BASE_DIR = Path(os.getcwd())
-UPLOAD_FOLDER = BASE_DIR / 'uploads'
-RESULTS_FOLDER = BASE_DIR / 'static' / 'results'
+
+# Use environment variable for production paths
+if os.environ.get('RENDER'):
+    # On Render, use the specific persistent storage directory
+    STORAGE_DIR = Path('/data')
+    STORAGE_DIR.mkdir(exist_ok=True)
+    UPLOAD_FOLDER = STORAGE_DIR / 'uploads'
+    RESULTS_FOLDER = STORAGE_DIR / 'results'
+    app.config['STATIC_FOLDER'] = str(STORAGE_DIR / 'static')
+else:
+    # Local development paths
+    UPLOAD_FOLDER = BASE_DIR / 'uploads'
+    RESULTS_FOLDER = BASE_DIR / 'static' / 'results'
+
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'm4a', 'flac'}
 
 # Ensure directories exist
-UPLOAD_FOLDER.mkdir(exist_ok=True)
-RESULTS_FOLDER.mkdir(parents=True, exist_ok=True)
+UPLOAD_FOLDER.mkdir(exist_ok=True, parents=True)
+RESULTS_FOLDER.mkdir(exist_ok=True, parents=True)
 
 # Initialize the audio analyzer
 analyzer = AudioAnalyzer(model_name='htdemucs', target_sr=44100)
@@ -82,8 +94,13 @@ def upload_file():
         # Convert filesystem paths to URL paths
         result_paths = {}
         for stem, path in separated_paths.items():
-            rel_path = os.path.relpath(path, BASE_DIR / 'static')
-            result_paths[stem] = url_for('static', filename=rel_path)
+            if os.environ.get('RENDER'):
+                # For Render, we need to handle static files differently
+                rel_path = os.path.relpath(path, STORAGE_DIR)
+                result_paths[stem] = f'/static/{rel_path}'
+            else:
+                rel_path = os.path.relpath(path, BASE_DIR / 'static')
+                result_paths[stem] = url_for('static', filename=rel_path)
         
         # Clean up the uploaded file
         upload_path.unlink()
@@ -113,10 +130,22 @@ def results(result_id):
     stems = {}
     for wav_file in output_dir.glob('*.wav'):
         stem_name = wav_file.stem
-        rel_path = os.path.relpath(wav_file, BASE_DIR / 'static')
-        stems[stem_name] = url_for('static', filename=rel_path)
+        if os.environ.get('RENDER'):
+            # For Render, we need to handle static files differently
+            rel_path = os.path.relpath(wav_file, STORAGE_DIR)
+            stems[stem_name] = f'/static/{rel_path}'
+        else:
+            rel_path = os.path.relpath(wav_file, BASE_DIR / 'static')
+            stems[stem_name] = url_for('static', filename=rel_path)
     
     return render_template('results.html', stems=stems)
+
+@app.route('/static/<path:filename>')
+def serve_static(filename):
+    """Serve static files from the storage directory on Render."""
+    if os.environ.get('RENDER'):
+        return send_from_directory(STORAGE_DIR, filename)
+    return app.send_static_file(filename)
 
 @app.errorhandler(413)
 def request_entity_too_large(error):
@@ -124,5 +153,6 @@ def request_entity_too_large(error):
     return jsonify({'error': 'File too large. Maximum size is 50MB'}), 413
 
 if __name__ == '__main__':
-    # For production, use gunicorn or another WSGI server
-    app.run(debug=True) 
+    # For production, use gunicorn
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port) 
