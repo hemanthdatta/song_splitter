@@ -1,12 +1,17 @@
 import os
 import uuid
 import shutil
+import logging
 from pathlib import Path
 from flask import Flask, request, render_template, url_for, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
 from audio_analyzer import AudioAnalyzer
 
 app = Flask(__name__)
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Configuration
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
@@ -29,13 +34,18 @@ else:
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'm4a', 'flac'}
 
 # Ensure directories exist
-STORAGE_DIR.mkdir(exist_ok=True, parents=True)
-UPLOAD_FOLDER.mkdir(exist_ok=True, parents=True)
-RESULTS_FOLDER.mkdir(exist_ok=True, parents=True)
-STATIC_FOLDER.mkdir(exist_ok=True, parents=True)
+try:
+    STORAGE_DIR.mkdir(exist_ok=True, parents=True)
+    UPLOAD_FOLDER.mkdir(exist_ok=True, parents=True)
+    RESULTS_FOLDER.mkdir(exist_ok=True, parents=True)
+    STATIC_FOLDER.mkdir(exist_ok=True, parents=True)
+    logger.info(f"Created directories: {STORAGE_DIR}, {UPLOAD_FOLDER}, {RESULTS_FOLDER}, {STATIC_FOLDER}")
+except Exception as e:
+    logger.error(f"Error creating directories: {e}")
+    raise
 
-# Initialize the audio analyzer
-analyzer = AudioAnalyzer(model_name='htdemucs', target_sr=44100)
+# Initialize the audio analyzer with explicit CPU device
+analyzer = AudioAnalyzer(model_name='htdemucs', target_sr=44100, device='cpu')
 
 def allowed_file(filename):
     """Check if the file extension is allowed."""
@@ -47,21 +57,26 @@ def cleanup_old_files():
     current_time = time.time()
     max_age = 86400  # 24 hours
     
-    # Cleanup uploads
-    for file_path in UPLOAD_FOLDER.glob('*'):
-        if current_time - file_path.stat().st_mtime > max_age:
-            try:
-                file_path.unlink()
-            except Exception as e:
-                app.logger.error(f"Error deleting {file_path}: {e}")
-    
-    # Cleanup results
-    for dir_path in RESULTS_FOLDER.glob('*'):
-        if dir_path.is_dir() and current_time - dir_path.stat().st_mtime > max_age:
-            try:
-                shutil.rmtree(dir_path)
-            except Exception as e:
-                app.logger.error(f"Error deleting {dir_path}: {e}")
+    try:
+        # Cleanup uploads
+        for file_path in UPLOAD_FOLDER.glob('*'):
+            if current_time - file_path.stat().st_mtime > max_age:
+                try:
+                    file_path.unlink()
+                    logger.info(f"Cleaned up old upload: {file_path}")
+                except Exception as e:
+                    logger.error(f"Error deleting {file_path}: {e}")
+        
+        # Cleanup results
+        for dir_path in RESULTS_FOLDER.glob('*'):
+            if dir_path.is_dir() and current_time - dir_path.stat().st_mtime > max_age:
+                try:
+                    shutil.rmtree(dir_path)
+                    logger.info(f"Cleaned up old results: {dir_path}")
+                except Exception as e:
+                    logger.error(f"Error deleting {dir_path}: {e}")
+    except Exception as e:
+        logger.error(f"Error during cleanup: {e}")
 
 @app.route('/')
 def index():
@@ -72,28 +87,37 @@ def index():
 @app.route('/upload', methods=['POST'])
 def upload_file():
     """Handle file upload and processing."""
+    logger.info("Starting file upload process")
+    
     if 'audio' not in request.files:
+        logger.error("No file part in request")
         return jsonify({'error': 'No file part'}), 400
     
     file = request.files['audio']
     if file.filename == '':
+        logger.error("No selected file")
         return jsonify({'error': 'No selected file'}), 400
     
     if not allowed_file(file.filename):
+        logger.error(f"File type not allowed: {file.filename}")
         return jsonify({'error': 'File type not allowed'}), 400
     
     try:
         # Save uploaded file
         filename = secure_filename(file.filename)
         upload_path = UPLOAD_FOLDER / filename
+        logger.info(f"Saving uploaded file to: {upload_path}")
         file.save(upload_path)
         
         # Create unique output directory
         output_dir = RESULTS_FOLDER / str(uuid.uuid4())
         output_dir.mkdir(exist_ok=True)
+        logger.info(f"Created output directory: {output_dir}")
         
         # Process the audio file
+        logger.info("Starting audio processing")
         separated_paths, sr = analyzer.separate_sources(str(upload_path), output_dir=str(output_dir))
+        logger.info("Audio processing completed")
         
         # Convert filesystem paths to URL paths
         result_paths = {}
@@ -108,6 +132,7 @@ def upload_file():
         
         # Clean up the uploaded file
         upload_path.unlink()
+        logger.info("Cleaned up uploaded file")
         
         return jsonify({
             'success': True,
@@ -115,45 +140,62 @@ def upload_file():
         })
     
     except Exception as e:
-        app.logger.error(f"Error processing file: {e}")
+        logger.error(f"Error processing file: {str(e)}", exc_info=True)
         # Clean up any uploaded/processed files
         if 'upload_path' in locals():
-            upload_path.unlink(missing_ok=True)
+            try:
+                upload_path.unlink(missing_ok=True)
+            except Exception as cleanup_error:
+                logger.error(f"Error cleaning up upload: {cleanup_error}")
         if 'output_dir' in locals():
-            shutil.rmtree(output_dir, ignore_errors=True)
-        return jsonify({'error': str(e)}), 500
+            try:
+                shutil.rmtree(output_dir, ignore_errors=True)
+            except Exception as cleanup_error:
+                logger.error(f"Error cleaning up output: {cleanup_error}")
+        return jsonify({'error': f"Error processing file: {str(e)}"}), 500
 
 @app.route('/results/<result_id>')
 def results(result_id):
     """Display the results page."""
     output_dir = RESULTS_FOLDER / result_id
     if not output_dir.exists():
+        logger.error(f"Results not found for ID: {result_id}")
         return "Results not found", 404
     
-    # Get all WAV files in the output directory
-    stems = {}
-    for wav_file in output_dir.glob('*.wav'):
-        stem_name = wav_file.stem
-        if os.environ.get('RENDER'):
-            # For Render, serve through the static endpoint
-            rel_path = os.path.relpath(wav_file, STATIC_FOLDER)
-            stems[stem_name] = url_for('static', filename=rel_path)
-        else:
-            rel_path = os.path.relpath(wav_file, BASE_DIR / 'static')
-            stems[stem_name] = url_for('static', filename=rel_path)
-    
-    return render_template('results.html', stems=stems)
+    try:
+        # Get all WAV files in the output directory
+        stems = {}
+        for wav_file in output_dir.glob('*.wav'):
+            stem_name = wav_file.stem
+            if os.environ.get('RENDER'):
+                # For Render, serve through the static endpoint
+                rel_path = os.path.relpath(wav_file, STATIC_FOLDER)
+                stems[stem_name] = url_for('static', filename=rel_path)
+            else:
+                rel_path = os.path.relpath(wav_file, BASE_DIR / 'static')
+                stems[stem_name] = url_for('static', filename=rel_path)
+        
+        logger.info(f"Found stems for result {result_id}: {list(stems.keys())}")
+        return render_template('results.html', stems=stems)
+    except Exception as e:
+        logger.error(f"Error serving results: {e}", exc_info=True)
+        return "Error serving results", 500
 
 @app.route('/static/<path:filename>')
 def serve_static(filename):
     """Serve static files."""
-    if os.environ.get('RENDER'):
-        return send_from_directory(STATIC_FOLDER, filename)
-    return app.send_static_file(filename)
+    try:
+        if os.environ.get('RENDER'):
+            return send_from_directory(STATIC_FOLDER, filename)
+        return app.send_static_file(filename)
+    except Exception as e:
+        logger.error(f"Error serving static file {filename}: {e}", exc_info=True)
+        return "Error serving file", 500
 
 @app.errorhandler(413)
 def request_entity_too_large(error):
     """Handle file too large error."""
+    logger.error("File too large error")
     return jsonify({'error': 'File too large. Maximum size is 50MB'}), 413
 
 if __name__ == '__main__':
