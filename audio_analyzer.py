@@ -1,8 +1,7 @@
 import os
 import torch
-import librosa
-import numpy as np
 import soundfile as sf
+import numpy as np
 import logging
 import gc
 from pathlib import Path
@@ -44,36 +43,73 @@ class AudioAnalyzer:
             logger.error(f"Error loading model: {e}", exc_info=True)
             raise
 
+    def load_audio(self, audio_path):
+        """Load audio file using soundfile."""
+        logger.info("Loading audio file...")
+        try:
+            # Get audio info without loading
+            info = sf.info(audio_path)
+            logger.info(f"Audio file info: {info}")
+            
+            # Load audio file
+            audio, sr = sf.read(audio_path)
+            logger.info(f"Loaded audio shape: {audio.shape}, Sample rate: {sr}")
+            
+            # Convert to float32 if needed
+            if audio.dtype != np.float32:
+                audio = audio.astype(np.float32)
+            
+            # Convert mono to stereo if needed
+            if len(audio.shape) == 1:
+                audio = np.stack([audio, audio])
+            elif audio.shape[1] == 2:  # If channels are second dimension
+                audio = audio.T
+            
+            logger.info(f"Processed audio shape: {audio.shape}")
+            return audio, sr
+            
+        except Exception as e:
+            logger.error(f"Error loading audio: {e}", exc_info=True)
+            raise
+
     def process_in_chunks(self, audio, chunk_samples):
         """Process audio in chunks to save memory."""
         logger.info("Processing audio in chunks")
         total_samples = audio.shape[1]
         chunks = []
         
-        for start in range(0, total_samples, chunk_samples):
-            end = min(start + chunk_samples, total_samples)
-            logger.info(f"Processing chunk {start//chunk_samples + 1}")
+        try:
+            for start in range(0, total_samples, chunk_samples):
+                end = min(start + chunk_samples, total_samples)
+                logger.info(f"Processing chunk {start//chunk_samples + 1} of {(total_samples + chunk_samples - 1)//chunk_samples}")
+                
+                # Extract chunk
+                chunk = audio[:, start:end]
+                chunk_tensor = torch.tensor(chunk, device=self.device).unsqueeze(0)
+                
+                # Process chunk
+                with torch.no_grad():
+                    processed_chunk = apply_model(self.separator, chunk_tensor, progress=False)
+                
+                # Move to CPU and convert to numpy
+                processed_chunk = processed_chunk.cpu().numpy()
+                chunks.append(processed_chunk)
+                
+                # Clear memory
+                del chunk_tensor, processed_chunk
+                if self.device == 'cuda':
+                    torch.cuda.empty_cache()
+                gc.collect()
             
-            # Extract chunk
-            chunk = audio[:, start:end]
-            chunk_tensor = torch.tensor(chunk, device=self.device).unsqueeze(0)
+            # Concatenate chunks
+            logger.info("Concatenating chunks...")
+            result = np.concatenate(chunks, axis=2)
+            logger.info(f"Final shape after concatenation: {result.shape}")
+            return result
             
-            # Process chunk
-            with torch.no_grad():
-                processed_chunk = apply_model(self.separator, chunk_tensor, progress=False)
-            
-            # Move to CPU and convert to numpy
-            processed_chunk = processed_chunk.cpu().numpy()
-            chunks.append(processed_chunk)
-            
-            # Clear memory
-            del chunk_tensor, processed_chunk
-            if self.device == 'cuda':
-                torch.cuda.empty_cache()
-            gc.collect()
-        
-        # Concatenate chunks
-        return np.concatenate(chunks, axis=2)
+        except Exception as e:
+            logger.error(f"Error processing chunks: {e}", exc_info=True)
+            raise
 
     def separate_sources(self, audio_path, output_dir=None):
         """Separate audio into different stems and save them."""
@@ -86,15 +122,8 @@ class AudioAnalyzer:
             output_dir.mkdir(exist_ok=True)
         
         try:
-            # Load audio using librosa at the target sample rate
-            logger.info("Loading audio file...")
-            audio, sr = librosa.load(audio_path, sr=self.target_sr, mono=False)
-            logger.info(f"Loaded audio shape: {audio.shape}, Sample rate: {sr}")
-            
-            # Convert mono to stereo if needed
-            if audio.ndim == 1:
-                audio = np.stack([audio, audio])
-            logger.info(f"Audio shape after ensuring stereo: {audio.shape}")
+            # Load audio
+            audio, sr = self.load_audio(audio_path)
             
             # Calculate chunk size in samples
             chunk_samples = self.chunk_size * sr
@@ -113,23 +142,27 @@ class AudioAnalyzer:
             
             logger.info("Saving separated stems...")
             for idx, name in enumerate(stem_names):
-                stem = sources[idx]  # shape: (channels, samples)
-                if stem.shape[0] < stem.shape[1]:
-                    stem = stem.T
-                
-                # Scale if needed
-                max_val = np.abs(stem).max()
-                if max_val > 0:
-                    stem = stem / max_val * 0.9
-                
-                out_path = output_dir / f"{name}.wav"
-                sf.write(out_path, stem, sr, subtype='PCM_16')
-                separated_paths[name] = str(out_path)
-                logger.info(f"Saved {name} stem to {out_path}")
-                
-                # Clear memory
-                del stem
-                gc.collect()
+                try:
+                    stem = sources[idx]  # shape: (channels, samples)
+                    if stem.shape[0] < stem.shape[1]:
+                        stem = stem.T
+                    
+                    # Scale if needed
+                    max_val = np.abs(stem).max()
+                    if max_val > 0:
+                        stem = stem / max_val * 0.9
+                    
+                    out_path = output_dir / f"{name}.wav"
+                    sf.write(out_path, stem, sr, subtype='PCM_16')
+                    separated_paths[name] = str(out_path)
+                    logger.info(f"Saved {name} stem to {out_path}")
+                    
+                    # Clear memory
+                    del stem
+                    gc.collect()
+                except Exception as e:
+                    logger.error(f"Error processing {name} stem: {e}", exc_info=True)
+                    raise
             
             return separated_paths, sr
             

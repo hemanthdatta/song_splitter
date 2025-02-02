@@ -3,7 +3,7 @@ services:
     name: song-splitter
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --timeout 300 --workers 2 --bind 0.0.0.0:$PORT
+    startCommand: gunicorn app:app --timeout 900 --workers 1 --threads 2 --bind 0.0.0.0:$PORT
     plan: free
     envVars:
       - key: PYTHON_VERSION
@@ -16,8 +16,19 @@ services:
         value: 10000
       - key: PYTHONUNBUFFERED
         value: "true"
+      - key: MALLOC_TRIM_THRESHOLD_
+        value: "65536"
     autoDeploy: true
     disk:
       name: song-splitter-data
       mountPath: /opt/render/project/src/data
-      sizeGB: 1 
+      sizeGB: 2
+    healthCheckPath: /
+    numInstances: 1
+    scaling:
+      minInstances: 1
+      maxInstances: 1
+      targetMemoryPercent: 90
+    limits:
+      memory: 1024
+      maxDuration: 900 
