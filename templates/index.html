@@ -137,9 +137,12 @@
         function showError(message) {
             errorContainer.querySelector('p').textContent = message;
             errorContainer.classList.remove('hidden');
-            setTimeout(() => {
-                errorContainer.classList.add('hidden');
-            }, 5000);
+            if (!message.includes('Error processing file')) {
+                setTimeout(() => {
+                    errorContainer.classList.add('hidden');
+                }, 5000);
+            }
+            resetUpload();
         }
 
         function uploadFile(file) {
@@ -151,7 +154,7 @@
             dropZone.classList.add('hidden');
 
             const xhr = new XMLHttpRequest();
-            xhr.open('POST', '/', true);
+            xhr.open('POST', '/upload', true);
 
             xhr.upload.onprogress = (e) => {
                 if (e.lengthComputable) {
@@ -162,16 +165,32 @@
 
             xhr.onload = function() {
                 if (xhr.status === 200) {
-                    window.location.href = xhr.responseURL;
+                    try {
+                        const response = JSON.parse(xhr.responseText);
+                        if (response.success) {
+                            window.location.href = response.redirect;
+                        } else {
+                            showError(response.error || 'Unknown error occurred');
+                        }
+                    } catch (e) {
+                        showError('Error parsing server response');
+                    }
                 } else {
-                    showError('An error occurred while processing your file.');
-                    resetUpload();
+                    try {
+                        const response = JSON.parse(xhr.responseText);
+                        showError(response.error || 'Error processing file');
+                    } catch (e) {
+                        showError('Error processing file');
+                    }
                 }
             };
 
             xhr.onerror = function() {
-                showError('An error occurred while uploading your file.');
-                resetUpload();
+                showError('Network error occurred while uploading file');
+            };
+
+            xhr.ontimeout = function() {
+                showError('Upload timed out. Please try again');
             };
 
             xhr.send(formData);

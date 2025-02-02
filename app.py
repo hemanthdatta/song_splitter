@@ -9,8 +9,11 @@ from audio_analyzer import AudioAnalyzer
 
 app = Flask(__name__)
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Set up logging with more detailed format
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Configuration
@@ -19,12 +22,18 @@ BASE_DIR = Path(os.getcwd())
 
 # Use environment variable for production paths
 if os.environ.get('RENDER'):
-    # On Render, use the specific storage path we have permission for
-    STORAGE_DIR = Path('/opt/render/project/src/storage')
+    # On Render, use a directory we definitely have permission for
+    STORAGE_DIR = Path('/opt/render/project/src/data')
     UPLOAD_FOLDER = STORAGE_DIR / 'uploads'
     RESULTS_FOLDER = STORAGE_DIR / 'results'
     STATIC_FOLDER = STORAGE_DIR / 'static'
     app.static_folder = str(STATIC_FOLDER)
+    
+    # Log environment info
+    logger.info(f"Running on Render")
+    logger.info(f"Current working directory: {os.getcwd()}")
+    logger.info(f"Directory listing: {os.listdir('.')}")
+    logger.info(f"Storage directory: {STORAGE_DIR}")
 else:
     # Local development paths
     UPLOAD_FOLDER = BASE_DIR / 'uploads'
@@ -33,19 +42,33 @@ else:
 
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'm4a', 'flac'}
 
-# Ensure directories exist
+# Ensure directories exist with proper permissions
 try:
-    STORAGE_DIR.mkdir(exist_ok=True, parents=True)
-    UPLOAD_FOLDER.mkdir(exist_ok=True, parents=True)
-    RESULTS_FOLDER.mkdir(exist_ok=True, parents=True)
-    STATIC_FOLDER.mkdir(exist_ok=True, parents=True)
-    logger.info(f"Created directories: {STORAGE_DIR}, {UPLOAD_FOLDER}, {RESULTS_FOLDER}, {STATIC_FOLDER}")
+    # Create directories with explicit permissions
+    for directory in [STORAGE_DIR, UPLOAD_FOLDER, RESULTS_FOLDER, STATIC_FOLDER]:
+        directory.mkdir(exist_ok=True, parents=True, mode=0o755)
+        logger.info(f"Created directory: {directory}")
+        
+        # Verify directory is writable
+        test_file = directory / '.test_write'
+        try:
+            test_file.touch()
+            test_file.unlink()
+            logger.info(f"Successfully verified write permissions for: {directory}")
+        except Exception as e:
+            logger.error(f"Directory {directory} is not writable: {e}")
+            raise
 except Exception as e:
-    logger.error(f"Error creating directories: {e}")
+    logger.error(f"Error setting up directories: {e}", exc_info=True)
     raise
 
 # Initialize the audio analyzer with explicit CPU device
-analyzer = AudioAnalyzer(model_name='htdemucs', target_sr=44100, device='cpu')
+try:
+    analyzer = AudioAnalyzer(model_name='htdemucs', target_sr=44100, device='cpu')
+    logger.info("Successfully initialized AudioAnalyzer")
+except Exception as e:
+    logger.error(f"Error initializing AudioAnalyzer: {e}", exc_info=True)
+    raise
 
 def allowed_file(filename):
     """Check if the file extension is allowed."""
@@ -81,37 +104,51 @@ def cleanup_old_files():
 @app.route('/')
 def index():
     """Render the upload page."""
-    cleanup_old_files()  # Clean up old files on page load
-    return render_template('index.html')
+    try:
+        cleanup_old_files()  # Clean up old files on page load
+        return render_template('index.html')
+    except Exception as e:
+        logger.error(f"Error in index route: {e}", exc_info=True)
+        return "Internal server error", 500
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
     """Handle file upload and processing."""
     logger.info("Starting file upload process")
     
-    if 'audio' not in request.files:
-        logger.error("No file part in request")
-        return jsonify({'error': 'No file part'}), 400
-    
-    file = request.files['audio']
-    if file.filename == '':
-        logger.error("No selected file")
-        return jsonify({'error': 'No selected file'}), 400
-    
-    if not allowed_file(file.filename):
-        logger.error(f"File type not allowed: {file.filename}")
-        return jsonify({'error': 'File type not allowed'}), 400
-    
     try:
+        if 'audio' not in request.files:
+            logger.error("No file part in request")
+            return jsonify({'error': 'No file part'}), 400
+        
+        file = request.files['audio']
+        if file.filename == '':
+            logger.error("No selected file")
+            return jsonify({'error': 'No selected file'}), 400
+        
+        if not allowed_file(file.filename):
+            logger.error(f"File type not allowed: {file.filename}")
+            return jsonify({'error': 'File type not allowed'}), 400
+        
         # Save uploaded file
         filename = secure_filename(file.filename)
         upload_path = UPLOAD_FOLDER / filename
         logger.info(f"Saving uploaded file to: {upload_path}")
+        
+        # Ensure upload directory exists
+        UPLOAD_FOLDER.mkdir(exist_ok=True, parents=True)
+        
+        # Save the file
         file.save(upload_path)
+        logger.info(f"File saved successfully: {upload_path}")
+        
+        # Verify file was saved
+        if not upload_path.exists():
+            raise Exception(f"File was not saved successfully: {upload_path}")
         
         # Create unique output directory
         output_dir = RESULTS_FOLDER / str(uuid.uuid4())
-        output_dir.mkdir(exist_ok=True)
+        output_dir.mkdir(exist_ok=True, parents=True)
         logger.info(f"Created output directory: {output_dir}")
         
         # Process the audio file
@@ -119,11 +156,15 @@ def upload_file():
         separated_paths, sr = analyzer.separate_sources(str(upload_path), output_dir=str(output_dir))
         logger.info("Audio processing completed")
         
+        # Verify output files exist
+        for stem_path in separated_paths.values():
+            if not Path(stem_path).exists():
+                raise Exception(f"Output file was not created: {stem_path}")
+        
         # Convert filesystem paths to URL paths
         result_paths = {}
         for stem, path in separated_paths.items():
             if os.environ.get('RENDER'):
-                # For Render, serve through the static endpoint
                 rel_path = os.path.relpath(Path(path), STATIC_FOLDER)
                 result_paths[stem] = url_for('static', filename=rel_path)
             else:
@@ -157,23 +198,26 @@ def upload_file():
 @app.route('/results/<result_id>')
 def results(result_id):
     """Display the results page."""
-    output_dir = RESULTS_FOLDER / result_id
-    if not output_dir.exists():
-        logger.error(f"Results not found for ID: {result_id}")
-        return "Results not found", 404
-    
     try:
+        output_dir = RESULTS_FOLDER / result_id
+        if not output_dir.exists():
+            logger.error(f"Results not found for ID: {result_id}")
+            return "Results not found", 404
+        
         # Get all WAV files in the output directory
         stems = {}
         for wav_file in output_dir.glob('*.wav'):
             stem_name = wav_file.stem
             if os.environ.get('RENDER'):
-                # For Render, serve through the static endpoint
                 rel_path = os.path.relpath(wav_file, STATIC_FOLDER)
                 stems[stem_name] = url_for('static', filename=rel_path)
             else:
                 rel_path = os.path.relpath(wav_file, BASE_DIR / 'static')
                 stems[stem_name] = url_for('static', filename=rel_path)
+        
+        if not stems:
+            logger.error(f"No stems found in output directory: {output_dir}")
+            return "No results found", 404
         
         logger.info(f"Found stems for result {result_id}: {list(stems.keys())}")
         return render_template('results.html', stems=stems)
@@ -186,6 +230,7 @@ def serve_static(filename):
     """Serve static files."""
     try:
         if os.environ.get('RENDER'):
+            logger.info(f"Serving static file from {STATIC_FOLDER}: {filename}")
             return send_from_directory(STATIC_FOLDER, filename)
         return app.send_static_file(filename)
     except Exception as e:
